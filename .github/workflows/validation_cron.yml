@@ -1,6 +1,7 @@
-name: Default workflow
+name: Validation on Schedule
 
 on:
+  workflow_dispatch:
   schedule:
     # Run every week on Monday at 8AM IST.
     - cron: '30 2 * * MON'
@@ -11,30 +12,22 @@ defaults:
 
 jobs:
   full:
-    name: Validate on Schedule
-
+    name: Validation
     runs-on: ubuntu-latest
-    container:
-      image: devwithlando/php:8.0-fpm-4
-
-    services:
-      database:
-        image: mariadb
-        env:
-          MYSQL_ROOT_PASSWORD: root
-        ports:
-          - 32574:3306
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
 
     env:
       CI: GITHUB_ACTIONS
       MYSQL_ROOT_PASSWORD: root
-      MYSQL_USER_PASSWORD: drupal
       MYSQL_USER_NAME: drupal
+      MYSQL_USER_PASSWORD: drupal
       MYSQL_DATABASE_NAME: drupal
       MYSQL_HOST: database
 
     steps:
+      - name: Add hosts to /etc/hosts
+        run: |
+          sudo echo "127.0.0.1 database" | sudo tee -a /etc/hosts
+
       - name: Prepare environment variables
         run: |
           echo "GITHUB_REF_NAME=$(echo ${GITHUB_REF##*/})" >> $GITHUB_ENV
@@ -43,35 +36,51 @@ jobs:
           echo "SCRIPT_DIR=$(echo ${GITHUB_WORKSPACE}/blt/scripts/github-actions)" >> $GITHUB_ENV
 
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Run Composer install
         run: |
           composer validate --no-check-all --ansi
           composer install --no-interaction || composer install --no-interaction || composer install --no-interaction
 
-      - name: Prepare bin executables
-        run: |
-          ln -s ${GITHUB_WORKSPACE}/vendor/acquia/blt/bin/blt /usr/local/bin/blt
-          ln -s ${GITHUB_WORKSPACE}/vendor/drush/drush/drush /usr/local/bin/drush
-
       - name: Cache dependencies installed with Composer
         id: composer-cache
         run: |
-          echo "::set-output name=dir::$(composer config cache-files-dir)"
+          echo dir=$(composer config cache-files-dir) >> $GITHUB_OUTPUT
 
-      - uses: actions/cache@v2
+      - uses: actions/cache@v3
         with:
           path: |
             "${{ steps.composer-cache.outputs.dir }}"
             ~/.drush/cache
           key: ${{ runner.os }}-composer-${{ hashFiles('composer.lock') }}
 
+      - name: Prepare bin executables
+        run: |
+          ln -s ${GITHUB_WORKSPACE}/vendor/acquia/blt/bin/blt /usr/local/bin/blt
+          ln -s ${GITHUB_WORKSPACE}/vendor/drush/drush/drush /usr/local/bin/drush
+
       - name: Setup environment
-        run: bash ${SCRIPT_DIR}/setup_env.sh
+        run: |
+          sudo systemctl start mysql.service
+          bash ${SCRIPT_DIR}/setup_env.sh
 
       - name: Setup app
         run: bash ${SCRIPT_DIR}/setup_app.sh
 
-      - name: Test app
-        run: bash ${SCRIPT_DIR}/test_app.sh
+      - name: Test Security
+        run: bash ${SCRIPT_DIR}/test_security.sh
+
+      - name: Setup ChromeDriver
+        uses: nanasess/setup-chromedriver@v1
+
+      - name: Run ChromeDriver
+        run: |
+          export DISPLAY=:99
+          chromedriver --url-base=/wd/hub &
+
+      - name: Test Behat
+        run: bash ${SCRIPT_DIR}/test_behat.sh
+
+      - name: Test PA11Y
+        run: bash ${SCRIPT_DIR}/test_pa11y.sh
